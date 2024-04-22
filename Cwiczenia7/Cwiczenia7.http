@@ -1,0 +1,6 @@
+@Cwiczenia7_HostAddress = http://localhost:5242
+
+GET {{Cwiczenia7_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
