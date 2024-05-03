@@ -4,5 +4,5 @@ namespace Cwiczenia7.Repositories;
 
 public interface IProductWarehouseRepository
 {
-    public int AddProduct(ProductWarehouse productWarehouse);
+    public int AddProduct(ProductWarehouse product);
 }
