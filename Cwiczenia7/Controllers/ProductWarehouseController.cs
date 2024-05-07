@@ -25,7 +25,7 @@ public class ProductWarehouseController : ControllerBase
             return StatusCode(StatusCodes.Status403Forbidden);
         }
         
-        return StatusCode(StatusCodes.Status201Created);
+        return StatusCode(StatusCodes.Status201Created); // czyli działa, to samo pokazują też moje zapytania do bazy
 
     }
 }
