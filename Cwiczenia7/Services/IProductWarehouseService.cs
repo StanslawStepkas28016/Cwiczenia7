@@ -4,5 +4,5 @@ namespace Cwiczenia7.Services;
 
 public interface IProductWarehouseService
 {
-    public int AddProduct(ProductWarehouse product);
+    public Task<int> AddProduct(ProductWarehouse product);
 }

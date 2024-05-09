@@ -16,13 +16,13 @@ public class ProductWarehouseController : ControllerBase
     }
 
     [HttpPost]
-    public IActionResult AddProduct(ProductWarehouse product)
+    public async Task<IActionResult> AddProduct(ProductWarehouse product)
     {
-        var res = _productWarehouseService.AddProduct(product);
+        var res = await _productWarehouseService.AddProduct(product);
 
         if (!(res > 0))
         {
-            return StatusCode(StatusCodes.Status403Forbidden);
+            return Problem("There was a problem with the product you want to add!");
         }
         
         return StatusCode(StatusCodes.Status201Created); // czyli działa, to samo pokazują też moje zapytania do bazy

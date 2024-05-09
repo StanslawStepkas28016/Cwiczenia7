@@ -12,28 +12,33 @@ public class ProductWarehouseRepository : IProductWarehouseRepository
         _connectionString = configuration.GetConnectionString("DefaultConnection");
     }
 
-    public int AddProduct(ProductWarehouse product)
+    public async Task<int> AddProduct(ProductWarehouse product)
         // Async w nazwie metody, jeżeli metoda korzysta z jakichkolwiek metod asynchronicznych, żeby dać 
         // znać programiście, że metoda korzysta z metod asynchronicznych. 
     {
-        if (!DoesProductAndWarehouseExistAndAmountGreaterThanZero(product).Result)
+        if (await DoesProductAndWarehouseExistAndAmountGreaterThanZero(product) == false)
         {
             return -1;
         }
 
-        if (!DoesOrderExist(product).Result)
+        if (await DoesOrderExist(product) == false)
         {
             return -1;
         }
 
-        if (DoesOrderAlreadyExistInWarehouse(product).Result)
+        if (await DoesOrderAlreadyExistInWarehouse(product))
+        {
+            return -1;
+        }
+
+        if (await IsCreationDateEarlierThanProvidedDate(product) == false)
         {
             return -1;
         }
 
         // Aktualizacja kolumny FulfilledAt na aktualną datę (UPDATE),
         // metoda zwraca idOrder, potrzebne do wykonania INSERT INTO Product_Warehouse.
-        int idOrder = UpdateOrderFulfilledAt(product).Result;
+        var idOrder = await UpdateOrderFulfilledAt(product);
         if (idOrder == -1)
         {
             return -1;
@@ -42,7 +47,7 @@ public class ProductWarehouseRepository : IProductWarehouseRepository
         // Wstawienie rekordu do tabeli Product_Warehouse,
         // - Kolumna [Product_Warehouse] Price ma odpowiadać [Product_Warehouse] Amount * [Product] Price,
         // - Kolumna [Product_Warehouse] CreatedAt ma mieć aktualny czas,
-        var idProductWarehouse = InsertIntoProduct_Warehouse(product, idOrder).Result;
+        var idProductWarehouse = await InsertIntoProduct_Warehouse(product, idOrder);
         if (idProductWarehouse == -1)
         {
             return -1;
@@ -53,59 +58,58 @@ public class ProductWarehouseRepository : IProductWarehouseRepository
 
     private async Task<int> InsertIntoProduct_Warehouse(ProductWarehouse product, int idOrder)
     {
-        using (var connection = new SqlConnection(_connectionString))
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+        var transaction = connection.BeginTransaction();
+
+        try
         {
-            await connection.OpenAsync();
-            var transaction = connection.BeginTransaction();
+            const string productPriceQuery = "SELECT Price AS ProductPrice FROM Product WHERE IdProduct = @IdProduct;";
+            double totalProductPrice = product.Amount;
 
-            try
+            await using (var productPriceCommand = new SqlCommand(productPriceQuery, connection, transaction))
             {
-                string productPriceQuery = @"SELECT Price AS ProductPrice FROM Product WHERE IdProduct = @IdProduct;";
-                double totalProductPrice = product.Amount;
+                productPriceCommand.Parameters.AddWithValue("@IdProduct", product.IdProduct);
 
-                using (SqlCommand productPriceCommand = new SqlCommand(productPriceQuery, connection, transaction))
+                await using (var reader = await productPriceCommand.ExecuteReaderAsync())
                 {
-                    productPriceCommand.Parameters.AddWithValue("@IdProduct", product.IdProduct);
-
-                    using (var reader = await productPriceCommand.ExecuteReaderAsync())
+                    if (await reader.ReadAsync())
                     {
-                        if (await reader.ReadAsync())
-                        {
-                            var price = (decimal)reader["ProductPrice"];
-                            totalProductPrice *= (double)price;
-                        }
-                    }
-                }
-
-
-                string insertQuery =
-                    @"INSERT INTO Product_Warehouse(IdWarehouse, IdProduct, IdOrder, Amount, Price, CreatedAt)
-                                VALUES(@IdWarehouse, @IdProduct, @IdOrder, @Amount, @Price, CURRENT_TIMESTAMP);
-                                SELECT SCOPE_IDENTITY();";
-
-                using (SqlCommand insertQueryCommand = new SqlCommand(insertQuery, connection, transaction))
-                {
-                    insertQueryCommand.Parameters.AddWithValue("@IdWarehouse", product.IdWarehouse);
-                    insertQueryCommand.Parameters.AddWithValue("@IdProduct", product.IdProduct);
-                    insertQueryCommand.Parameters.AddWithValue("@IdOrder", idOrder);
-                    insertQueryCommand.Parameters.AddWithValue("@Amount", product.Amount);
-                    insertQueryCommand.Parameters.AddWithValue("@Price", totalProductPrice);
-
-                    // Tutaj ma być zwrócone IdProductWarehouse, które jest z IDENTITY.
-                    var res = await insertQueryCommand.ExecuteScalarAsync();
-
-                    if (res != null)
-                    {
-                        transaction.Commit();
-                        return Convert.ToInt32(res);
+                        var price = (decimal)reader["ProductPrice"];
+                        totalProductPrice *= (double)price;
                     }
                 }
             }
-            catch (Exception e)
+
+
+            const string insertQuery = """
+                                       INSERT INTO Product_Warehouse(IdWarehouse, IdProduct, IdOrder, Amount, Price, CreatedAt)
+                                                                       VALUES(@IdWarehouse, @IdProduct, @IdOrder, @Amount, @Price, CURRENT_TIMESTAMP);
+                                                                       SELECT SCOPE_IDENTITY();
+                                       """;
+
+            await using (var insertQueryCommand = new SqlCommand(insertQuery, connection, transaction))
             {
-                transaction.Rollback();
-                throw new Exception("Failed to \'InsertIntoProduct_Warehouse\'!");
+                insertQueryCommand.Parameters.AddWithValue("@IdWarehouse", product.IdWarehouse);
+                insertQueryCommand.Parameters.AddWithValue("@IdProduct", product.IdProduct);
+                insertQueryCommand.Parameters.AddWithValue("@IdOrder", idOrder);
+                insertQueryCommand.Parameters.AddWithValue("@Amount", product.Amount);
+                insertQueryCommand.Parameters.AddWithValue("@Price", totalProductPrice);
+
+                // Tutaj ma być zwrócone IdProductWarehouse, które jest z IDENTITY.
+                var res = await insertQueryCommand.ExecuteScalarAsync();
+
+                if (res != null)
+                {
+                    transaction.Commit();
+                    return Convert.ToInt32(res);
+                }
             }
+        }
+        catch (Exception e)
+        {
+            transaction.Rollback();
+            throw new Exception("Failed to \'InsertIntoProduct_Warehouse\'!");
         }
 
         return -1;
@@ -113,41 +117,37 @@ public class ProductWarehouseRepository : IProductWarehouseRepository
 
     private async Task<int> UpdateOrderFulfilledAt(ProductWarehouse product)
     {
-        using (var connection = new SqlConnection(_connectionString))
+        await using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync();
+        var transaction = connection.BeginTransaction();
+
+        try
         {
-            await connection.OpenAsync();
-            var transaction = connection.BeginTransaction();
+            const string updateQuery = """
+                                       
+                                                           UPDATE [Order]
+                                                           SET FulfilledAt = CURRENT_TIMESTAMP
+                                                           OUTPUT INSERTED.IdOrder
+                                                           WHERE IdProduct = @IdProduct;
+                                       """;
 
-            try
+            await using var updateCommand = new SqlCommand(updateQuery, connection, transaction);
+            updateCommand.Parameters.AddWithValue("@IdProduct", product.IdProduct);
+            await using var reader = await updateCommand.ExecuteReaderAsync();
+            
+            if (await reader.ReadAsync())
             {
-                string updateQuery = @"
-                    UPDATE [Order]
-                    SET FulfilledAt = CURRENT_TIMESTAMP
-                    OUTPUT INSERTED.IdOrder
-                    WHERE IdProduct = @IdProduct;";
-
-                using (SqlCommand updateCommand = new SqlCommand(updateQuery, connection, transaction))
-                {
-                    updateCommand.Parameters.AddWithValue("@IdProduct", product.IdProduct);
-
-                    using (var reader = await updateCommand.ExecuteReaderAsync())
-                    {
-                        if (await reader.ReadAsync())
-                        {
-                            int idOrder = (int)reader["IdOrder"];
-                            await reader.CloseAsync();
-                            transaction.Commit();
-                            return idOrder;
-                        }
-                    }
-                }
+                var idOrder = (int)reader["IdOrder"];
+                await reader.CloseAsync();
+                transaction.Commit();
+                return idOrder;
             }
-            catch (Exception e)
-            {
-                transaction.Rollback();
-                await Console.Out.WriteLineAsync(e.Message);
-                throw new Exception("Failed to \'UpdateOrderFulfilledAt\'! " + e.Message + " " + e);
-            }
+        }
+        catch (Exception e)
+        {
+            transaction.Rollback();
+            await Console.Out.WriteLineAsync(e.Message);
+            throw new Exception("Failed to \'UpdateOrderFulfilledAt\'! " + e.Message + " " + e);
         }
 
         return -1;
@@ -163,24 +163,25 @@ public class ProductWarehouseRepository : IProductWarehouseRepository
             return false;
         }
 
-        string query = @"SELECT (SELECT 1 FROM Product WHERE IdProduct = @IdProduct) AS ProductExists,
-                                (SELECT 1 FROM Warehouse WHERE IdWarehouse = @IdWarehouse) AS WarehouseExists;";
+        const string query = """
+                             SELECT (SELECT 1 FROM Product WHERE IdProduct = @IdProduct) AS ProductExists,
+                                                             (SELECT 1 FROM Warehouse WHERE IdWarehouse = @IdWarehouse) AS WarehouseExists;
+                             """;
 
-        SqlConnection connection = new SqlConnection(_connectionString);
-        SqlCommand command = new SqlCommand(query, connection);
+        await using var connection = new SqlConnection(_connectionString);
+        await using var command = new SqlCommand(query, connection);
         command.Parameters.AddWithValue("@IdProduct", product.IdProduct);
         command.Parameters.AddWithValue("@IdWarehouse", product.IdWarehouse);
-        connection.Open();
 
-        using (var reader = await command.ExecuteReaderAsync())
+        await connection.OpenAsync();
+        await using var reader = await command.ExecuteReaderAsync();
+        
+        if (await reader.ReadAsync())
         {
-            if (await reader.ReadAsync())
-            {
-                bool productExists = reader["ProductExists"] != DBNull.Value;
-                bool warehouseExists = reader["WarehouseExists"] != DBNull.Value;
+            var productExists = reader["ProductExists"] != DBNull.Value;
+            var warehouseExists = reader["WarehouseExists"] != DBNull.Value;
 
-                return productExists && warehouseExists;
-            }
+            return productExists && warehouseExists;
         }
 
         return false;
@@ -190,55 +191,73 @@ public class ProductWarehouseRepository : IProductWarehouseRepository
     {
         // Sprawdzenie, czy istnieje rekord w tabeli Order, który
         // zawiera Id i Amount z obiektu (modelu) podanego w argumencie.
-        string query = @"SELECT 1 AS OrderExists FROM [Order] WHERE IdProduct = @IdWarehouse AND Amount = @Amount;";
+        const string query =
+            "SELECT 1 AS OrderExists FROM [Order] WHERE IdProduct = @IdWarehouse AND Amount = @Amount;";
 
-        SqlConnection connection = new SqlConnection(_connectionString);
-        SqlCommand command = new SqlCommand(query, connection);
+        await using var connection = new SqlConnection(_connectionString);
+        await using var command = new SqlCommand(query, connection);
         command.Parameters.AddWithValue("@IdWarehouse", product.IdWarehouse);
         command.Parameters.AddWithValue("@Amount", product.Amount);
 
         await connection.OpenAsync();
 
-        using (var reader = await command.ExecuteReaderAsync())
+        await using var reader = await command.ExecuteReaderAsync();
+
+        if (await reader.ReadAsync())
         {
-            if (await reader.ReadAsync())
-            {
-                return reader["OrderExists"] != DBNull.Value;
-            }
+            return reader["OrderExists"] != DBNull.Value;
         }
 
         return false;
     }
 
-    private bool IsCreationDateEarlierThanProvidedDate(ProductWarehouse productWarehouse)
+    private async Task<bool> IsCreationDateEarlierThanProvidedDate(ProductWarehouse productWarehouse)
     {
         // Sprawdzenie, czy data utworzenia Order (CreatedAt) jest wcześniejsza,
-        // niż data z obiektu (modelu) (CreatedAt)
-        return true;
+        // niż data z obiektu (modelu) (CreatedAt).
+        const string query = """
+                             SELECT 1 AS CreationEarlier FROM [Order]
+                                                   WHERE CreatedAt < @CreatedAt;
+                             """;
+
+        await using var connection = new SqlConnection(_connectionString);
+        await using var command = new SqlCommand(query, connection);
+
+        command.Parameters.AddWithValue("@CreatedAt", productWarehouse.CreatedAt);
+
+        await connection.OpenAsync();
+        await using var reader = await command.ExecuteReaderAsync();
+
+        if (await reader.ReadAsync())
+        {
+            return reader["CreationEarlier"] != DBNull.Value;
+        }
+
+        return false;
     }
 
     private async Task<bool> DoesOrderAlreadyExistInWarehouse(ProductWarehouse product)
     {
         // Sprawdzenie, czy nie istnieje rekord w tabeli Product_Warehouse,
         // który ma takie samo IdOrder.
-        string query = @"SELECT 1 AS AlreadyExists FROM Product_Warehouse 
-                            WHERE IdWarehouse = @IdWarehouse 
-                            AND IdProduct = @IdProduct;";
+        const string query = """
+                             SELECT 1 AS AlreadyExists FROM Product_Warehouse
+                                                         WHERE IdWarehouse = @IdWarehouse
+                                                         AND IdProduct = @IdProduct;
+                             """;
 
-        SqlConnection connection = new SqlConnection(_connectionString);
-        SqlCommand command = new SqlCommand(query, connection);
+        await using var connection = new SqlConnection(_connectionString);
+        var command = new SqlCommand(query, connection);
 
         command.Parameters.AddWithValue("@IdWarehouse", product.IdWarehouse);
         command.Parameters.AddWithValue("@IdProduct", product.IdProduct);
 
         await connection.OpenAsync();
 
-        using (var reader = await command.ExecuteReaderAsync())
+        await using var reader = await command.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
         {
-            if (await reader.ReadAsync())
-            {
-                return reader["AlreadyExists"] != DBNull.Value;
-            }
+            return reader["AlreadyExists"] != DBNull.Value;
         }
 
         return false;
