@@ -6,4 +6,5 @@ namespace Cwiczenia7.Repositories;
 public interface IProductWarehouseRepository
 {
     public Task<int> AddProduct(ProductWarehouse product);
+    public Task<int> AddProductProcedure(ProductWarehouse product);
 }
